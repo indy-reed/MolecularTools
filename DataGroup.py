@@ -84,3 +84,4 @@ class DataGroup:
     
     def Name(self):
         return self._GroupName[self._GroupID] 
+
