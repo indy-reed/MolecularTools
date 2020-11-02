@@ -1,3 +1,132 @@
+def UpdateAtomData(DataUser,AtomData):
+
+    import mariadb
+    import pandas as pd
+    
+    # Insert new calculation information into calculation table
+    #print ('Updating molecular data into TABLE calculations')
+    # 1. Query calculations to get current calculations. Each combination of label, method
+    #    and basis is unique.
+    Connection = DataUser.OpenConnection()
+    cur = Connection.cursor()
+    cur.execute('USE moleculardata')
+    cur.execute("""SELECT AtomicNumber 
+                FROM atomenergy""")
+    CurrentAtomQuery = cur.fetchall()
+    # 2. Convert query to list of current Labels
+    CurLabel = [j for sub in CurrentAtomQuery for j in sub]
+    #print(CurLabel)
+    # 3. Transform calculation data into dataframe 
+    AtomDataColumns = ['Label','Atom','BasisSet','Multiplicity',
+                       'SCFEnergy','MP2Energy','CCSDEnergy','CCSDTEnergy','CalcTime']
+    AtomDataframe = pd.DataFrame(AtomData,columns=AtomDataColumns)
+    #print(AtomDataframe)
+    # 4. Add Secondary Key MoleID.
+    cur.execute("SELECT LOWER(AtomicSymbol), AtomicNumber FROM elements")
+    AtomNumDict = dict(cur.fetchall())
+    #print(AtomNumDict)
+    AtomNumList = list(map(lambda i: AtomNumDict[AtomData[i][1]],range(len(AtomData))))
+    AtomDataframe['AtomicNumber'] = AtomNumList
+    AtomDataColumns.append('AtomicNumber')
+    # 5. Clean data: remove current molecules currently in the database from data frame.
+    #    Drop label and compound columns from dataframe.
+    NewAtomDataframe = AtomDataframe[~AtomDataframe['Atom'].isin(CurLabel)]
+    AtomList = NewAtomDataframe[AtomDataColumns[2:]].values.tolist()
+    # 6. If new data exists:
+    if len(AtomList) > 0:
+        # A. Create string to add data
+        DatabaseAtomString = UpdateDatabaseQuery(AtomList,AtomDataColumns[2:],'atomenergy')
+        # B. SQL query
+        try:
+            cur.execute(DatabaseAtomString)
+        except mariadb.Error as e4:
+            print('Error testing MariaDB Database Table element: {error}'.format(error=e4))
+    cur.close()
+    DataUser.CloseConnection(Connection)
+    return len(AtomList)
+
+def ExtractCalcAtom():
+
+    # This subroutine will extract the data for atoms. Unlike molecules, an atom is
+    # at the center of the coordinate system and there are no bond lengths, angles, or
+    # dihedral angles that differ based on the calculation method. All the data of interest
+    # is included in the CCSD(T) output.
+
+    import os.path
+
+    # Lists of types of calculations and basis sets
+    # General note: ccsdt is a convient short hand for CCSD(T). It is NOT CCSDT.
+    CalcList = ['ccsdt']
+    BasisList = ['pvdz','pvtz','pvqz','pcvdz','pcvtz','pcvqz']
+    #NanoBasis = ['pvqz','pcvdz','pcvtz','pcvqz']
+    DataList = []
+    # The goal of these tools is to be able to run them in multiple different places.
+    # For the moment, the program will assume a directory structure as follows:
+    #   molecules/{Compound Label}/{Calculation Label}/{Basis set Label}
+    CompDir = 'molecules\\'
+    # CompList is list of compounds. Extract data for each compound.  
+    #CompList = MoleculeDataframe['MoleLabel'].values.tolist()
+    CompList = ['h','b','c','n','o','f','al','si','p','s','cl']
+    #CompGroup = MoleculeDataframe['MoleGroup'].values.tolist()
+    Count = 0
+    for i in range(len(CompList)):
+        # Compound subdirectory if it exists
+        CompPath = CompDir + CompList[i] + '\\'
+        if not(os.path.isdir(CompPath)): continue
+        for calc in CalcList:
+            # Calculation subdirectory if it exists
+            CalcPath = CompPath + calc + '\\'
+            if not(os.path.isdir(CalcPath)): continue
+            for basis in BasisList:
+                # Basis set subdirectory if it exists
+                BasisPath = CalcPath + basis + '\\'
+                if not(os.path.isdir(BasisPath)): continue
+                # Data file if it exists
+                DataFileName = BasisPath + 'prp.dat'
+                if os.path.exists(DataFileName):
+                    # Open data file for reading
+                    DataFile = open(DataFileName,'r')
+                    # Initialize values for energy.
+                    Count += 1
+                    if (Count % 20) == 0: print('*',end='') 
+                    # Read each line of the data file
+                    for line in DataFile:
+                        # Extract multiplicity
+                        if 'IMULTP' in line:
+                            Multiplicity = int(line[48:52])
+                        # Extract the number of basis functions.
+                        if 'basis functions' in line:
+                            NumBasFunc = int(line[12:17])
+                        # Extract the SCF energy. This value is computed for each type of 
+                        # calculation.
+                        if 'E(SCF)=' in line:
+                            SCFEnergy = float(line.split()[1])
+                        # Extract MP2 energy. This value is computed during MP2, CCSD, and 
+                        # CCSD(T) calculations.
+                        if 'Total MP2 energy' in line:
+                            MP2Energy = float(line.split()[4])
+                        # Extract CCSD energy. This value is computed during CCSD and CCSD(T)
+                        # calculations. It is found in two different forms.
+                        if 'CCSD energy  ' in line:
+                            if 'Total' in line:
+                                CCSDEnergy = float(line.split()[4])
+                            else:
+                                CCSDEnergy = float(line.split()[2])
+                        # Extract CCSD(T) energy.
+                        if 'CCSD(T) energy  ' in line:
+                            CCSDTEnergy = float(line.split()[2])
+                        if 'This computation required' in line:
+                            CalcTime = float(line.split()[3])
+                    # Create a unique label for each calculation
+                    label = '{COMP}:{CALC}/{BAS}'.format(COMP=CompList[i],CALC=calc,BAS=basis)
+                    # Combine the values and append them to DataList 
+                    CalcData = [label,CompList[i],basis,Multiplicity,SCFEnergy,
+                                MP2Energy,CCSDEnergy,CCSDTEnergy,CalcTime]
+                    DataList.append(CalcData)
+    #print(DataList)
+    #print('Data extracted from {} files'.format(len(DataList)))
+    return DataList
+
 def CreateDatabase(DataUser):
 
     """
@@ -10,7 +139,9 @@ def CreateDatabase(DataUser):
     import mariadb
 
     # Open cursor for data queries using the Connection in DataUser
-    cur = DataUser.Connection.cursor()
+
+    CreateConnection = DataUser.OpenConnection()
+    cur = CreateConnection.cursor()
 
     # Map of relational database A
     MDCompString =  '\t+{:-<22}+\n'.format('')
@@ -82,6 +213,32 @@ def CreateDatabase(DataUser):
     # and location.
     except mariadb.Error as e2:
         print('Error creating Table elements: {error}'.format(error=e2))
+
+    DatabaseAEStringA = 'DROP TABLE IF EXISTS atomenergy'
+    DatabaseAEStringB = '''CREATE TABLE IF NOT EXISTS atomenergy(
+            AtomEnergyID    INT UNSIGNED NOT NULL PRIMARY KEY AUTO_INCREMENT,
+            AtomicNumber    INT NOT NULL,
+            BasisSet        CHAR(6),
+            Multiplicity    INT,
+            SCFEnergy       REAL NOT NULL,
+            MP2Energy       REAL,
+            CCSDEnergy      REAL,
+            CCSDTEnergy     REAL,
+            CalcTime    REAL NOT NULL,
+            CONSTRAINT `fk_elem_atom_en`
+                FOREIGN KEY (AtomicNumber) REFERENCES elements (AtomicNumber)
+                    ON DELETE CASCADE
+                    ON UPDATE RESTRICT);'''
+    try:
+        cur.execute(DatabaseAEStringA)
+        cur.execute(DatabaseAEStringB)
+    # If an error (or exception) occurs executing the queries, then print the error 
+    # and location.
+    except mariadb.Error as e2a:
+        print('Error creating Table atomenergies: {error}'.format(error=e2a))
+
+    AtomCalcList = ExtractCalcAtom()
+    NewAEneCount = UpdateAtomData(DataUser,AtomCalcList)
 
     # Map of relational database B
     ETCompString =  '\t+{:-<22}+\n'.format('')
@@ -327,6 +484,7 @@ def CreateDatabase(DataUser):
 
     # Close cursor
     cur.close()
+    DataUser.CloseConnection(CreateConnection)
 
 def UpdateDatabaseQuery(DataTable, DataColumns, DataTableName):
 
@@ -348,7 +506,6 @@ def UpdateDatabaseQuery(DataTable, DataColumns, DataTableName):
     DataColumnsString = str(tuple(DataColumns)).replace("'","")
     DatabaseString = 'INSERT INTO {} {} VALUES\n'.format(DataTableName,DataColumnsString)
     DatabaseString += DataString[:-2] + ';'
-    #print(DatabaseString)
     return DatabaseString
 
 def UpdateCalcData(DataUser,MoleculeDataframe,CalcData):
@@ -360,7 +517,9 @@ def UpdateCalcData(DataUser,MoleculeDataframe,CalcData):
     #print ('Updating molecular data into TABLE calculations')
     # 1. Query calculations to get current calculations. Each combination of label, method
     #    and basis is unique.
-    cur = DataUser.Connection.cursor()
+    Connection = DataUser.OpenConnection()
+    cur = Connection.cursor()
+    cur.execute('USE moleculardata')
     cur.execute("""SELECT m.MoleLabel, c.CalcType, c.BasisSet
                 FROM calculations AS c 
                 JOIN molecules AS m
@@ -391,8 +550,9 @@ def UpdateCalcData(DataUser,MoleculeDataframe,CalcData):
         try:
             cur.execute(DatabaseCalcString)
         except mariadb.Error as e4:
-            print('Error testing MariaDB Database Table element: {error}'.format(error=e4))
+            print('Error testing MariaDB Database Table atomenergy: {error}'.format(error=e4))
     cur.close()
+    DataUser.CloseConnection(Connection)
     return len(CalcList)
     
 def UpdateCoordData(DataUser,MoleculeDataframe,AtomList,CoordList):
@@ -400,8 +560,10 @@ def UpdateCoordData(DataUser,MoleculeDataframe,AtomList,CoordList):
     import mariadb
     import pandas as pd
 
-    cur = DataUser.Connection.cursor()
+    Connection = DataUser.OpenConnection()
+    cur = Connection.cursor()
     try:
+        cur.execute('USE moleculardata')
         cur.execute("SELECT MoleLabel, MoleID FROM molecules")
         MoleIDdict = dict(cur.fetchall())
     except mariadb.Error as e:
@@ -533,6 +695,7 @@ def UpdateCoordData(DataUser,MoleculeDataframe,AtomList,CoordList):
         except mariadb.Error as e4:
             print('Error inserting data into Table cartcoords: {error}'.format(error=e4))
     cur.close()
+    DataUser.CloseConnection(Connection)
     return len(AIMList),len(CartList)
 
 def ExtractCalcData(MoleculeDataframe):
@@ -661,7 +824,6 @@ def ExtractCartCoordData(DataUser,MoleculeDataframe):
     import os.path
     import mariadb
 
-    cur = DataUser.Connection.cursor()
     #print('Extracting Cartesian coordinate data')
     # Lists of types of calculations and basis sets
     # General note: ccsdt is a convient short hand for CCSD(T). It is NOT CCSDT.
@@ -673,10 +835,16 @@ def ExtractCartCoordData(DataUser,MoleculeDataframe):
     # Pull data from elements table into dictionary to map Atomic Symbols in coordinate
     # file to Atomic Number
     try:
+        Connection = DataUser.OpenConnection()
+        cur = Connection.cursor()
+        cur.execute('USE moleculardata')
         cur.execute("""SELECT UPPER(AtomicSymbol), AtomicNumber FROM elements""")
         AtomDict = dict(cur.fetchall())
+        cur.close()
+        DataUser.CloseConnection(Connection)
     except mariadb.Error as e:
         print('Error selecting data from Table element: {error}'.format(error=e))
+        AtomDict = {}
 
     # The goal of these tools is to be able to run them in multiple different places.
     # For the moment, the program will assume a directory structure as follows:
@@ -731,7 +899,6 @@ def ExtractCartCoordData(DataUser,MoleculeDataframe):
 
     #print(AtomList)
     #print('Data extracted for {} atoms and {} coordinates'.format(len(AtomList),len(CartList)))
-    cur.close()
 
     return AtomList, CartList
 
@@ -742,22 +909,21 @@ def UpdateDatabase(DataUser):
     import pandas as pd
     import numpy as np
 
-    cur = DataUser.Connection.cursor()
-
     # Preliminaries:
     # 1. Data file for molecules table to be read into dataframe
-    RefFileName = 'MoleculeTableB.xlsx'
-    #print('Default file for data: {}'.format(RefFileName)) 
+    RefFileName = 'MoleculeTable.xlsx'
     MoleculeDataframe = pd.read_excel(RefFileName,index_col=0)
     TotalMoleCount = len(MoleculeDataframe)
 
     # Insert new molecule information into molecule table
-    #print('Updating data into TABLE molecules')
-
     # 1. Querry molecule to get current molecules. Each MoleLabel is unique.
+    Connection = DataUser.OpenConnection()
+    cur = Connection.cursor()
     cur.execute('USE moleculardata')
     cur.execute('SELECT MoleLabel FROM molecules')
     CurrentMoleculeQuery = cur.fetchall()
+    cur.close()
+    DataUser.CloseConnection(Connection)
 
     # 2. Convert query to list of current molecules by flattening two dimensional
     #    query list [('label #1',),('label #2',), ...] to one dimensional list
@@ -789,11 +955,14 @@ def UpdateDatabase(DataUser):
         DatabaseMolString = UpdateDatabaseQuery(MoleculeList,MoleculeColumns,'molecules')
         # SQL query
         try:
+            Connection = DataUser.OpenConnection()
+            cur = Connection.cursor()
+            cur.execute('USE moleculardata')
             cur.execute(DatabaseMolString)
+            cur.close()
+            DataUser.CloseConnection(Connection)
         except mariadb.Error as e1:
             print('Error inserting Database Table molecules: {error}'.format(error=e1))
-
-    cur.close()
 
     print('Extracting Data:',end = '')
     CalcList = ExtractCalcData(MoleculeDataframe)
@@ -819,7 +988,6 @@ def UpdateDatabase(DataUser):
     SummaryString += '|{:^10}|{:^15}|{:^15}|{:^15}|{:^15}|\n'.format('New',*NewCountList)
     SummaryString += '+{:-<10}+{:-<15}+{:-<15}+{:-<15}+{:-<15}+\n'.format('','','','','')
     print(SummaryString)
-    cur.close()
 
 def UpdateMenu(DataUser):
 
