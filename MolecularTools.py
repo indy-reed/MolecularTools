@@ -7,6 +7,7 @@
 import MolecularDatabase
 import mariadb
 import DataGroup
+import CompareMethods
 
 class User:
 
@@ -26,6 +27,12 @@ class User:
 
     import mariadb
     
+    # The constructor will get the user's name and password. Then, test the 
+    # connection to the database. If a connection can be established, it will
+    # access the user profile and determine if the user can update the database.
+    # The user has permission to update the database, connect to the database,
+    # user name and password are then stored for future use. The test connection
+    # is closed. 
     # Object constructor
     def __init__(self):
 
@@ -49,7 +56,7 @@ class User:
             # Variable to indicate whether the user is connected to the database
             self.Connected = True
             try: 
-                self.Connection = mariadb.connect(
+                Connection = mariadb.connect(
                                     user = self.Name,
                                     host = self.Host,
                                     password= self.Password,
@@ -61,25 +68,51 @@ class User:
                 print('Please try again.')
                 self.Connected = False
         if self.Connected:
-            AccessQuery = self.Connection.cursor()
+            AccessQuery = Connection.cursor()
             AccessQuery.execute('USE mysql')
             AccessQuery.execute("SELECT Create_priv FROM user WHERE User = '{}'".format(self.Name))
             AccessList = [i for sub in AccessQuery for i in sub]
             if (AccessList[0] == 'Y'):
                 self.Update = True
+            AccessQuery.close()
+            Connection.close()
 
         if not self.Connected:
             print('Maximum number of login attempts exceeded.')
 
-    def __del__(self):
-        if self.Connected:
-            self.Connection.close()
-
     def test(self):
-        TestQuery = self.Connection.cursor()
-        TestQuery.execute('USE molecules')
-        TestQuery.execute('SHOW TABLES')
-        return [j for sub in TestQuery for j in sub]
+
+        try:
+            Connection = mariadb.connect(
+                                    user = self.Name,
+                                    host = self.Host,
+                                    password= self.Password,
+                                    port=3306)
+            TestQuery = Connection.cursor()
+            TestQuery.execute('USE moleculardata')
+            TestQuery.execute('SHOW TABLES')
+            return [j for sub in TestQuery for j in sub]
+            TestQuery.close()
+            Connection.close()
+        except mariadb.Error as e:
+            print('Unable open connection {}.'.format(e))
+            return[]
+
+    def OpenConnection(self):
+
+        try: 
+            Connection = mariadb.connect(
+                                    user = self.Name,
+                                    host = self.Host,
+                                    password= self.Password,
+                                    port=3306)
+        except mariadb.Error as e:
+            print('Unable open connection {}.'.format(e))
+
+        return Connection
+
+    def CloseConnection(self,Connection):
+        Connection.close()
 
 def MolecularToolsStartUp():
     StartUpLine1 = 'Welcome to Molecular Tools'
@@ -101,157 +134,48 @@ def UpdateStatus(DataUser):
     BasisDict = {'pvdz': 'cc-pVDZ', 'pvtz': 'cc-pVTZ', 'pvqz': 'cc-pVQZ',
                  'pcvdz':'cc-pCVDZ','pcvtz':'cc-pCVTZ','pcvqz':'cc-pCVQZ'}
     CalcDict = {'scf':'SCF','mp2':'MP2','ccsd':'CCSD','ccsdt':'CCSD(T)'}
-    for Group in Groups:
-        #print('Summary of {} molecule group:'.format(Group))
-        try:
-            StatusQuery = DataUser.Connection.cursor()
-            StatusQuery.execute('USE moleculardata')
-            StatusQuery.execute("""SELECT c.CalcType, c.BasisSet, COUNT(*) AS count 
+    try:
+        StatusConnection = DataUser.OpenConnection()
+        for Group in Groups:
+            try:    
+                StatusQuery = StatusConnection.cursor()
+                StatusQuery.execute('USE moleculardata')
+                StatusQuery.execute("""SELECT c.CalcType, c.BasisSet, COUNT(*) AS count 
                                 FROM calculations AS c 
                                 JOIN molecules AS m 
                                 ON c.MoleID = m.MoleID
                                 WHERE m.MoleGroup = '{GROUP}'
                                 GROUP BY c.CalcType, c.BasisSet""".format(GROUP=Group))
-            StatusList = StatusQuery.fetchall()
-        except mariadb.Error as e:
-            print('Error {} in UpdateStatus Group {}'.format(e,Group))
-            StatusList = []
-        if len(StatusList) > 0:
-            StatusColumns = ['calc','basis','count']
-            StatusDf = pd.DataFrame(StatusList,columns=StatusColumns)
-            StatusPT = pd.pivot_table(StatusDf,index = 'calc',columns='basis')
-            BasisList = StatusPT.columns.values.tolist()
-            CalcList = StatusPT.index.values.tolist()
-            CountList = StatusPT.values.tolist()
-            StatusStringA = '+{:-<10}'.format('')
-            StatusStringB = '|{:^10}'.format(Group)
-            for Basis in BasisList:
-                StatusStringA += '+{:-<10}'.format('')
-                StatusStringB += '|{:^10}'.format(BasisDict[Basis[1]])
-            StatusString = StatusStringA + '+\n' + StatusStringB + '|\n' + StatusStringA + '+\n'
-            for i in range(len(CountList)):
-                StatusLine = '|{:^10}'.format(CalcDict[CalcList[i]])
-                for j in range(len(CountList[i])):
-                    StatusLine += '|{:^10}'.format(CountList[i][j])
-                StatusString += StatusLine + '|\n'
-            StatusString += StatusStringA + '+\n'
-            print(StatusString)
+                StatusList = StatusQuery.fetchall()
+            except mariadb.Error as e:
+                print('Error {} in UpdateStatus Group {}'.format(e,Group))
+                StatusList = []
+            if len(StatusList) > 0:
+                StatusColumns = ['calc','basis','count']
+                StatusDf = pd.DataFrame(StatusList,columns=StatusColumns)
+                StatusPT = pd.pivot_table(StatusDf,index = 'calc',columns='basis')
+                BasisList = StatusPT.columns.values.tolist()
+                CalcList = StatusPT.index.values.tolist()
+                CountList = StatusPT.values.tolist()
+                StatusStringA = '+{:-<10}'.format('')
+                StatusStringB = '|{:^10}'.format(Group)
+                for Basis in BasisList:
+                    StatusStringA += '+{:-<10}'.format('')
+                    StatusStringB += '|{:^10}'.format(BasisDict[Basis[1]])
+                StatusString = StatusStringA + '+\n' + StatusStringB + '|\n' + StatusStringA + '+\n'
+                for i in range(len(CountList)):
+                    StatusLine = '|{:^10}'.format(CalcDict[CalcList[i]])
+                    for j in range(len(CountList[i])):
+                        StatusLine += '|{:^10}'.format(CountList[i][j])
+                    StatusString += StatusLine + '|\n'
+                StatusString += StatusStringA + '+\n'
+                print(StatusString)
+
+        DataUser.CloseConnection(StatusConnection)
+    except mariadb.Error as ea:
+        print('Error connection to data serve: {}.'.format(ea,Group))
 
     Pause = input('Press any key to return to Main Menu.')
-
-def GroupMenuOption(Reference='',DataSets=['nano','small','medium','large','macro']):
-
-    MenuString = '\t+{:-<30}+\n\t|{:^30}|\n\t+{:-<30}+\n'.format('',Reference.upper()+' MENU','')
-    MenuString += '\t|{:^10}|{:^19}|\n\t|{:-<10}+{:-<19}|\n'.format('Option','Data Set','','')
-    for i in range(len(DataSets)):
-        MenuString += '\t|{:^10}| {:<18}|\n'.format(str(i+1),DataSets[i])
-    MenuString += '\t+{:-<30}+'.format('')
-    print(MenuString)
-
-    OptionPromptString = 'Please select a data set for {}: '.format(Reference)
-
-    OptionS = input(OptionPromptString)
-    if OptionS.isdigit():
-        Option = int(OptionS)
-        if (Option > 0) and (Option <= len(DataSets)):
-            return Option - 1
-        else:
-            print ('Option is not recognized. Option set to default.')
-            return len(DataSets) - 1
-    else:
-        print ('Input is not recognized. Option set to default.')
-        return len(DataSets) - 1
-
-def GetRotationalData(DataUser,CompGroup,CoordLabel):
-
-    import pandas as pd
-
-    # Query the data base for rotational constants
-    CompareQuery = DataUser.Connection.cursor()
-    CompareQuery.execute('USE moleculardata')
-    CompareQuery.execute("""SELECT M.MoleLabel, CONCAT(C.CalcType, '/' ,C.BasisSet) AS CB, 
-                                C.RotConst{}
-                                FROM calculations AS C
-                                JOIN molecules AS M
-                                    ON C.MoleID = M.MoleID""".format(CoordLabel))
-    BData = CompareQuery.fetchall()
-    CompareQuery.close()
-
-    # Transform data to dataframe
-    BColumns = ['MoleLabel','calc/basis','B']
-    BDataframe = pd.DataFrame(BData,columns=BColumns)
-
-    # Create pivot table:
-    # Dataframe:
-    # Label   calc/basis  B
-    #   A1       B1      C1
-    #   A1       B2      C2
-    #   A2       B1      C3
-    #   A2       B2      C4
-    #    pivot table
-    #           B1       B2
-    #   A1      C1       C2
-    #   A2      C3       C4
-    BPivotTable = pd.pivot(BDataframe,index='MoleLabel',columns='calc/basis')
-
-    # Clean pivot table by:
-    # 1. Select the calculation/basis set combinations associated with the data
-    #    the user wants to compare
-    BPivotTable = BPivotTable[CompGroup.PivotComboList('B')]
-    # 2. Remove any rows where the rotational constant is NaN
-    BPivotTable.dropna(axis=0,how='any',inplace=True)
-
-    return BPivotTable
-
-def CompareMethods(DataUser):
-
-    import pandas as pd
-
-    import DataGroup
-
-    CI95 = 1.96
-    # Obtain user option which corresponds to the index in Groups 
-
-    Groups = ['nano','small','medium','large']
-    A = GroupMenuOption(Reference='Calculation Comparison',DataSets=Groups)
-    CompareGroup = DataGroup.DataGroup(A)
-
-    BxyzPivotTable = pd.DataFrame()
-    for Coord in ['X','Y','Z']:
-        BPivotTable = GetRotationalData(DataUser,CompareGroup,Coord)
-        BxyzPivotTable = BxyzPivotTable.append(BPivotTable)
-
-    # Compute the relative difference of the rotational constant with respect to
-    # the reference for the data set.
-    #
-    #    (Bx - Bx,r) / Bx,r
-    BxyzPivotRef = BxyzPivotTable[CompareGroup.RefComboTuple('B')]
-    BxyzPivotTable = BxyzPivotTable.sub(BxyzPivotRef,axis=0)
-    BxyzPivotTable = BxyzPivotTable.div(BxyzPivotRef,axis=0)
-
-    # Compute the mean and standard deviation of the realative difference for
-    # each calculation/ basis set combination
-    MeanBxyz = BxyzPivotTable.mean(axis=0).values.tolist()
-    StDvBxyz = BxyzPivotTable.std(axis=0).values.tolist()
-    SkewBxyz = BxyzPivotTable.skew(axis=0).values.tolist()
-
-    # Print summary table with the mean, standard deviation (Std Dv) and confidence interval (95%)
-    # The confidence interval is 1.96 times the standard of deviation.
-    ComparisonH = '\t+{:-<59}+\n\t|{:^59}|\n\t|{:>20} {:<38}|\n'.format('',                                       
-          'Comparison of relative difference of',len(BxyzPivotTable),
-          'Rotational Constants')
-    ComparisonA = '\t+{:-<20}+{:-<12}+{:-<12}+{:-<12}+\n'.format('','','','')
-    ComparisonB = '\t|{:^20}|{:^12}|{:^12}|{:^12}|\n'.format(CompareGroup.Name(),
-                                                             'Mean','Std Dv','95% CI')
-    ComparisonD = ''
-    GpOut = CompareGroup.PrintComboList()
-    for i in range(len(GpOut)):
-        ComparisonD += '\t|{:^20}|{:^12.6f}|{:^12.6f}|{:^12.6f}|\n'.format(GpOut[i],
-                                              MeanBxyz[i],StDvBxyz[i],CI95*StDvBxyz[i])
-    Comparison = ComparisonH + ComparisonA + ComparisonB + ComparisonA + ComparisonD + ComparisonA
-    print (Comparison)
-
-    Pause = input('Press <Enter> to return to Main Menu.')
 
 
 def MolecularToolsMainMenu(DataUser):
@@ -291,7 +215,7 @@ def MolecularToolsMainMenu(DataUser):
         if Option == 'A':
             UpdateStatus(DataUser)
         elif Option == 'B':
-            CompareMethods(DataUser)
+            CompareMethods.CompareMethods(DataUser)
         elif Option == 'C':
             print(DataUser.test())
         elif (Option == 'Q') or (Option == 'q'):
@@ -305,10 +229,8 @@ def MolecularToolsMainMenu(DataUser):
 
 MolecularToolsStartUp()
 DataUser = User()
-if not DataUser.Connected:
-    del DataUser
-    exit()
+
 
 MolecularToolsMainMenu(DataUser)
-del DataUser
+
 
